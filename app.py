@@ -36,6 +36,11 @@ genai.configure(api_key=GEMINI_API_KEY)
 # 無料枠の最新モデルを指定
 model = genai.GenerativeModel('gemini-2.5-flash')
 
+# === ここから追加 ===
+@app.route("/")
+def home():
+    return "I'm alive!"
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
