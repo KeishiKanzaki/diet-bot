@@ -55,3 +55,9 @@ Werkzeug==3.1.4
 wrapt==2.0.1
 yarl==1.22.0
 zipp==3.23.0
+flask
+line-bot-sdk
+google-generativeai
+pillow
+supabase
+gotrue
