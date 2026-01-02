@@ -114,7 +114,7 @@ def handle_image_message(event):
             total_cal = sum([row['calorie'] for row in rows.data])
 
             # 5. 返信メッセージ作成
-            final_reply = f"{reply_base}\n\n(今日の合計: {total_cal}kcal 📝)"
+            final_reply = f"{reply_base}\n\n今回の: 約{calorie}kcal\n(今日の合計: {total_cal}kcal 📝)"
 
             # LINEへ送信
             line_bot_api.reply_message(
