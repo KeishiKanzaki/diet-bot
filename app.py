@@ -72,6 +72,28 @@ def handle_image_message(event):
             # ユーザーID取得（データベース用）
             user_id = event.source.user_id
 
+            user_check = supabase.table("users").select("user_id", "target_weight").eq("user_id", user_id).execute()
+            
+            target_weight = 0 # デフォルト値
+            
+            # まだ登録されていない場合
+            if not user_check.data:
+                # LINEからプロフィール（名前）を取得
+                profile = line_bot_api.get_profile(user_id)
+                display_name = profile.display_name
+                
+                # Supabaseに新規登録
+                supabase.table("users").insert({
+                    "user_id": user_id,
+                    "user_name": display_name,
+                    "target_weight": 0,    # とりあえず0にしておく
+                    "current_weight": 0    # とりあえず0にしておく
+                }).execute()
+                print(f"【新規登録】{display_name} さんを登録しました。")
+            else:
+                # 既にいる場合は、目標体重などのデータを取得しておく（後で使うため）
+                target_weight = user_check.data[0].get('target_weight', 0)
+
             # 2. プロンプト（JSONモードで数値を抽出させる）
             prompt = """
             あなたはユーザー（20代女性）の親友「ユキ」です。
