@@ -11,7 +11,8 @@ from linebot.v3.messaging import (
     MessagingApi,
     MessagingApiBlob,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    ShowLoadingAnimationRequest # ← 追加
 )
 from linebot.v3.webhooks import MessageEvent, ImageMessageContent
 import google.generativeai as genai
@@ -29,19 +30,15 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
-# キー設定チェック
 if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY]):
     print("【Warning】環境変数が不足しています。Renderの設定画面を確認してください。")
 
-# LINE設定
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Gemini設定
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash') # モデル名は安定版の2.5-flash推奨
+model = genai.GenerativeModel('gemini-1.5-flash') 
 
-# Supabase設定
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 @app.route("/")
@@ -65,80 +62,100 @@ def handle_image_message(event):
         line_bot_blob_api = MessagingApiBlob(api_client)
         
         try:
-            # 1. 画像の取得
-            image_data = line_bot_blob_api.get_message_content(event.message.id)
-            image = Image.open(io.BytesIO(image_data))
-            
-            # ユーザーID取得（データベース用）
             user_id = event.source.user_id
 
+            # ==========================================
+            # ▼▼▼ 1. Loadingアニメーションを表示 (New!) ▼▼▼
+            # ==========================================
+            # 処理が始まる前に「考え中...」のアニメーションを出す
+            # loadingSeconds: 何秒間表示するか（最大60秒。返信が来ると自動で消えます）
+            line_bot_api.show_loading_animation(
+                ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=20)
+            )
+
+            # ユーザー登録処理
             user_check = supabase.table("users").select("user_id", "target_weight").eq("user_id", user_id).execute()
             
-            target_weight = 0 # デフォルト値
-            
-            # まだ登録されていない場合
+            target_weight = 0
             if not user_check.data:
-                # LINEからプロフィール（名前）を取得
                 profile = line_bot_api.get_profile(user_id)
                 display_name = profile.display_name
-                
-                # Supabaseに新規登録
                 supabase.table("users").insert({
                     "user_id": user_id,
                     "user_name": display_name,
-                    "target_weight": 0,    # とりあえず0にしておく
-                    "current_weight": 0    # とりあえず0にしておく
+                    "target_weight": 0,
+                    "current_weight": 0
                 }).execute()
                 print(f"【新規登録】{display_name} さんを登録しました。")
             else:
-                # 既にいる場合は、目標体重などのデータを取得しておく（後で使うため）
                 target_weight = user_check.data[0].get('target_weight', 0)
 
-            # 2. プロンプト（JSONモードで数値を抽出させる）
+            # ==========================================
+            # ▼▼▼ 2. 画像取得 & Gemini (成分分析を追加) ▼▼▼
+            # ==========================================
+            image_data = line_bot_blob_api.get_message_content(event.message.id)
+            image = Image.open(io.BytesIO(image_data))
+
             prompt = """
             あなたはユーザー（20代女性）の親友「ユキ」です。
             送られた食事の写真を見て、以下のJSONフォーマットのみを出力してください。
-            余計な文字（```json など）は含めないでください。
-
+            
+            【重要な制約】
+            ・カロリーや栄養素は画像からの「推測値」です。
+            ・医療的アドバイスは禁止。
+            
+            【出力フォーマット】
             {
                 "food_name": "料理名（短く）",
-                "calorie": カロリーの推定値（整数のみ、例: 600）,
-                "reply_text": "本人への返信（タメ口ギャル語、全肯定、カロリー数値には触れず「美味しそう！」などの感想メインで3行以内）"
+                "calorie": 整数値,
+                "carbs": "炭水化物の推測値（例: 50g）",
+                "protein": "タンパク質の推測値（例: 20g）",
+                "fat": "脂質の推測値（例: 15g）",
+                "reply_text": "タメ口ギャル語で全肯定。数値には触れず、見た目やバランスを褒める。3行以内。"
             }
             """
             
-            # JSON生成モードでリクエスト
             response = model.generate_content(
                 [prompt, image],
                 generation_config={"response_mime_type": "application/json"}
             )
             
-            # JSONを辞書型に変換
             data = json.loads(response.text)
+            
+            # データを取得（なければデフォルト値）
             food_name = data.get("food_name", "ご飯")
             calorie = data.get("calorie", 0)
+            carbs = data.get("carbs", "不明")
+            protein = data.get("protein", "不明")
+            fat = data.get("fat", "不明")
             reply_base = data.get("reply_text", "美味しそう！✨")
 
-            # 3. Supabaseに保存（記憶）
+            # 3. Supabaseに保存
             supabase.table("food_logs").insert({
                 "user_id": user_id,
                 "food_name": food_name,
                 "calorie": calorie
             }).execute()
 
-            # 4. 今日の合計カロリーを計算
-            # 日本時間(JST)の今日0時を作成
+            # 4. 集計
             jst = datetime.timezone(datetime.timedelta(hours=9))
             today_start = datetime.datetime.now(jst).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-            
-            # データベースから今日の分を取得して集計
             rows = supabase.table("food_logs").select("calorie").eq("user_id", user_id).gte("created_at", today_start).execute()
             total_cal = sum([row['calorie'] for row in rows.data])
 
-            # 5. 返信メッセージ作成
-            final_reply = f"{reply_base}\n\n今回の: 約{calorie}kcal\n(今日の合計: {total_cal}kcal 📝)"
+            # ==========================================
+            # ▼▼▼ 5. 返信メッセージ (成分表示を追加) ▼▼▼
+            # ==========================================
+            final_reply = (
+                f"{reply_base}\n\n"
+                f"📊 今回の目安:\n"
+                f"・カロリー: 約{calorie}kcal\n"
+                f"・P(タンパク質): {protein}\n"
+                f"・F(脂質): {fat}\n"
+                f"・C(炭水化物): {carbs}\n\n"
+                f"(今日の合計: {total_cal}kcal 📝)"
+            )
 
-            # LINEへ送信
             line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
@@ -148,11 +165,10 @@ def handle_image_message(event):
             
         except Exception as e:
             print(f"Error: {e}")
-            # エラー時は安全なメッセージを返す
             line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
-                    messages=[TextMessage(text="ごめん、ちょっと計算ミスっちゃった💦 もう一回送ってみて！🥺")]
+                    messages=[TextMessage(text="ごめん、ちょっと見えなかったかも💦 もう一回送ってみて！🥺")]
                 )
             )
 
