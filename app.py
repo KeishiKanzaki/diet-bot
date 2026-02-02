@@ -55,6 +55,9 @@ def callback():
         abort(400)
     return 'OK'
 
+# ==========================================
+# ▼▼▼ 1. 画像メッセージの処理（最終レイアウト決定版） ▼▼▼
+# ==========================================
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
     with ApiClient(configuration) as api_client:
@@ -64,35 +67,29 @@ def handle_image_message(event):
         try:
             user_id = event.source.user_id
 
-            # ==========================================
-            # ▼▼▼ 1. Loadingアニメーションを表示 (New!) ▼▼▼
-            # ==========================================
-            # 処理が始まる前に「考え中...」のアニメーションを出す
-            # loadingSeconds: 何秒間表示するか（最大60秒。返信が来ると自動で消えます）
+            # Loadingアニメーション
             line_bot_api.show_loading_animation(
                 ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=20)
             )
 
-            # ユーザー登録処理
+            # ユーザー登録チェック
             user_check = supabase.table("users").select("user_id", "target_weight").eq("user_id", user_id).execute()
             
-            target_weight = 0
             if not user_check.data:
-                profile = line_bot_api.get_profile(user_id)
-                display_name = profile.display_name
+                try:
+                    profile = line_bot_api.get_profile(user_id)
+                    display_name = profile.display_name
+                except:
+                    display_name = "Guest"
+                
                 supabase.table("users").insert({
                     "user_id": user_id,
                     "user_name": display_name,
                     "target_weight": 0,
                     "current_weight": 0
                 }).execute()
-                print(f"【新規登録】{display_name} さんを登録しました。")
-            else:
-                target_weight = user_check.data[0].get('target_weight', 0)
 
-            # ==========================================
-            # ▼▼▼ 2. 画像取得 & Gemini (成分分析を追加) ▼▼▼
-            # ==========================================
+            # 画像取得 & Gemini解析
             image_data = line_bot_blob_api.get_message_content(event.message.id)
             image = Image.open(io.BytesIO(image_data))
 
@@ -122,7 +119,6 @@ def handle_image_message(event):
             
             data = json.loads(response.text)
             
-            # データを取得（なければデフォルト値）
             food_name = data.get("food_name", "ご飯")
             calorie = data.get("calorie", 0)
             carbs = data.get("carbs", "不明")
@@ -130,30 +126,32 @@ def handle_image_message(event):
             fat = data.get("fat", "不明")
             reply_base = data.get("reply_text", "美味しそう！✨")
 
-            # 3. Supabaseに保存
+            # データを保存
             supabase.table("food_logs").insert({
                 "user_id": user_id,
                 "food_name": food_name,
                 "calorie": calorie
             }).execute()
 
-            # 4. 集計
+            # 今日の合計を計算
             jst = datetime.timezone(datetime.timedelta(hours=9))
             today_start = datetime.datetime.now(jst).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
             rows = supabase.table("food_logs").select("calorie").eq("user_id", user_id).gte("created_at", today_start).execute()
             total_cal = sum([row['calorie'] for row in rows.data])
 
             # ==========================================
-            # ▼▼▼ 5. 返信メッセージ (成分表示を追加) ▼▼▼
+            # ▼▼▼ レイアウト修正（ご指定の形式） ▼▼▼
             # ==========================================
             final_reply = (
                 f"{reply_base}\n\n"
+                f"🍽️ {food_name}\n"
                 f"📊 今回の目安:\n"
                 f"・カロリー: 約{calorie}kcal\n"
                 f"・P(タンパク質): {protein}\n"
                 f"・F(脂質): {fat}\n"
                 f"・C(炭水化物): {carbs}\n\n"
-                f"(今日の合計: {total_cal}kcal 📝)"
+                f"────────\n"
+                f"今日の合計: {total_cal}kcal 📝"
             )
 
             line_bot_api.reply_message(
