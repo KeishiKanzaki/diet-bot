@@ -14,7 +14,7 @@ from linebot.v3.messaging import (
     TextMessage,
     ShowLoadingAnimationRequest # ← 追加
 )
-from linebot.v3.webhooks import MessageEvent, ImageMessageContent
+from linebot.v3.webhooks import MessageEvent, ImageMessageContent, TextMessageContent
 import google.generativeai as genai
 from PIL import Image
 from supabase import create_client, Client
@@ -169,6 +169,58 @@ def handle_image_message(event):
                     messages=[TextMessage(text="ごめん、ちょっと見えなかったかも💦 もう一回送ってみて！🥺")]
                 )
             )
+
+# ==========================================
+# ▼▼▼ 2. テキストメッセージの処理 (シンプル会話版) ▼▼▼
+# ==========================================
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text_message(event):
+    with ApiClient(configuration) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        
+        user_id = event.source.user_id
+        user_message = event.message.text
+        
+        # 1. Loadingアニメーション（会話でも出すと親切）
+        line_bot_api.show_loading_animation(
+            ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=20)
+        )
+
+        try:
+            # 2. ユーザーの名前だけ取得（親しみを込めるため）
+            user_data = supabase.table("users").select("user_name").eq("user_id", user_id).execute()
+            user_name = "キミ"
+            if user_data.data:
+                user_name = user_data.data[0]['user_name']
+
+            # 3. Geminiへのプロンプト（体重管理の話は削除）
+            prompt = f"""
+            あなたは20代女性の親友「ユキ」です。
+            ユーザー（名前: {user_name}）から以下のメッセージが来ました。
+            
+            メッセージ: "{user_message}"
+            
+            以下のルールで返信してください：
+            ・タメ口、ギャル語、全肯定。
+            ・短くテンポよく（3行以内）。
+            ・「お腹すいた」などの相談には、食事管理を頑張ってる友達として励ます。
+            ・体重の数字や目標設定の話は自分からはしない。
+            """
+            
+            response = model.generate_content(prompt)
+            reply_text = response.text
+
+            # 返信
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text=reply_text)]
+                )
+            )
+
+        except Exception as e:
+            print(f"Error: {e}")
+            # エラー時は何もしない
 
 if __name__ == "__main__":
     app.run(port=5000)
