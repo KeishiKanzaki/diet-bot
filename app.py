@@ -1,240 +1,216 @@
-import os
+import base64
 import io
 import json
-import datetime
-from flask import Flask, request, abort
+import logging
+import os
+from functools import lru_cache
+
+import requests
+from flask import Flask, abort, jsonify, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    MessagingApiBlob,
-    ReplyMessageRequest,
-    TextMessage,
-    ShowLoadingAnimationRequest # ← 追加
-)
+from linebot.v3.messaging import ApiClient, Configuration, MessagingApi, MessagingApiBlob, ReplyMessageRequest, TextMessage
 from linebot.v3.webhooks import MessageEvent, ImageMessageContent, TextMessageContent
-import google.generativeai as genai
-from PIL import Image
-from supabase import create_client, Client
+from PIL import Image, ImageOps, UnidentifiedImageError
+from supabase import ClientOptions, create_client
+
+from nutrition import SYSTEM_PROMPT, MEAL_PROMPT, day_bounds, validate_meal, meal_reply, calorie_summary
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
+logging.basicConfig(level=logging.INFO)
+# httpx INFO logs include database query URLs containing LINE user IDs.
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+REQUIRED = ('LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'GEMINI_API_KEY', 'GEMINI_MODEL', 'SUPABASE_URL', 'SUPABASE_KEY')
+LINE_REQUIRED = ('LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET')
+handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET', 'not-configured'))
+Image.MAX_IMAGE_PIXELS = 20_000_000
+CONSENT_VERSION = '2026-10-18'
+INTRO = ('ユキは食生活を支えるAIです。管理栄養士・医師ではなく、診断や個別の治療は行いません。'
+         '\n18歳以上の一般成人向け招待制β版です。\n食事画像・相談文をGoogle Geminiへ送信し、'
+         'LINEユーザーID・食事記録・同意日時をSupabaseに保存します。画像自体は当サービスのDBに保存しません。'
+         '\n写真の栄養値は推定です。\n「プライバシー」で詳細を確認し、同意する場合は「同意する」と送信してください。')
+HELP = '初めての方は「プライバシー」を確認し、「同意する」と送ってください。\n写真で食事を記録できます。\n「今日」合計を確認\n「料金」β版の案内\n「プライバシー」データの扱い\n「データ削除」全記録を削除\n相談も送れます。'
 
-# ==========================================
-# ▼▼▼ 環境変数の取得 ▼▼▼
-# ==========================================
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 
-if not all([LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY]):
-    print("【Warning】環境変数が不足しています。Renderの設定画面を確認してください。")
+@lru_cache(maxsize=1)
+def db():
+    return create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'],
+                         options=ClientOptions(postgrest_client_timeout=10))
 
-configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-3-flash-preview") 
+def generate(text, image=None):
+    parts = [{'text': text}]
+    if image:
+        parts.append({'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(image).decode()}})
+    config = {'maxOutputTokens': 2048}
+    if image:
+        config['responseMimeType'] = 'application/json'
+    response = requests.post(
+        'https://generativelanguage.googleapis.com/v1beta/models/' + os.environ['GEMINI_MODEL'] + ':generateContent',
+        headers={'x-goog-api-key': os.environ['GEMINI_API_KEY']},
+        json={'systemInstruction': {'parts': [{'text': SYSTEM_PROMPT}]},
+              'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': config}, timeout=(5, 20))
+    response.raise_for_status()
+    candidates = response.json().get('candidates', [])
+    if not candidates or candidates[0].get('finishReason') != 'STOP':
+        raise RuntimeError('AI response incomplete')
+    result = ''.join(p.get('text', '') for p in candidates[0].get('content', {}).get('parts', []) if not p.get('thought'))
+    if not result.strip():
+        raise RuntimeError('AI response empty')
+    return result
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-@app.route("/")
+@app.get('/')
 def home():
-    return "I'm alive!"
+    return 'Yuki nutrition AI beta'
 
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers['X-Line-Signature']
-    body = request.get_data(as_text=True)
+
+@app.get('/healthz')
+def health():
+    ready = all(os.getenv(key) for key in REQUIRED)
+    return jsonify(status='configured' if ready else 'not_configured'), 200 if ready else 503
+
+
+@app.get('/readyz')
+def readiness():
+    if not all(os.getenv(key) for key in REQUIRED):
+        return jsonify(status='not_configured'), 503
     try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
+        revision = db().rpc('nutrition_schema_version', {}).execute().data
+        if revision != '001_beta':
+            raise RuntimeError('Unexpected schema revision')
+    except Exception as exc:
+        app.logger.error('database_readiness_failed type=%s', type(exc).__name__)
+        return jsonify(status='database_not_ready'), 503
+    # This checks DB access and migration, not Google/LINE credentials or model access.
+    return jsonify(status='ready', schema=revision), 200
+
+
+@app.post('/callback')
+def callback():
+    # Keep help/price/privacy available even when Google or the database is down.
+    if not all(os.getenv(key) for key in LINE_REQUIRED):
+        app.logger.error('webhook_line_configuration_missing')
+        abort(503)
+    signature = request.headers.get('X-Line-Signature')
+    if not signature:
+        abort(400)
+    try:
+        handler.handle(request.get_data(as_text=True), signature)
+    except (InvalidSignatureError, ValueError):
+        app.logger.warning('webhook_rejected')
         abort(400)
     return 'OK'
 
-# ==========================================
-# ▼▼▼ 1. 画像メッセージの処理（最終レイアウト決定版） ▼▼▼
-# ==========================================
+
+def today_rows(user_id):
+    start, end = day_bounds()
+    return db().table('food_logs').select('calorie').eq('user_id', user_id).gte('created_at', start).lt('created_at', end).execute().data
+
+
+def consented(user_id):
+    rows = db().table('users').select('consent_version').eq('user_id', user_id).execute().data
+    return bool(rows and rows[0].get('consent_version') == CONSENT_VERSION)
+
+
+def text_command(user_id, text):
+    if text in ('使い方', 'ヘルプ'):
+        return HELP
+    if text == 'プライバシー':
+        return INTRO + '\n記録は削除するまで保持。削除は「データ削除」→「削除を確定」。バックアップや外部事業者側の保持は各社規定によります。\n' + os.getenv('PRIVACY_URL', '運営者への連絡先・正式ポリシーは招待時の案内をご確認ください。')
+    if text == '料金':
+        return '現在は無料の招待制β版です。1日あたりAI利用は最大' + os.getenv('DAILY_AI_LIMIT', '10') + '回（失敗も含む）。自動課金はありません。有料版は検証後にご案内します。'
+    if text == 'データ削除':
+        return '全食事記録・同意情報・利用履歴を削除します。実行する場合は「削除を確定」と送信してください。'
+    if text == '削除を確定':
+        db().rpc('delete_nutrition_user', {'p_user_id': user_id}).execute()
+        return 'データを削除しました。再開時には再度同意が必要です。'
+    if text == '同意する':
+        db().rpc('accept_nutrition_consent', {'p_user_id': user_id}).execute()
+        return '同意を記録しました。\n' + HELP
+    if not consented(user_id):
+        return INTRO
+    if text == '今日':
+        rows = today_rows(user_id)
+        total, notice = calorie_summary(rows)
+        return f"今日の記録: {len(rows)}件、約{total:g}kcal。{notice}\n写真からの推定です。未記録の食事は含みません。"
+    return None
+
+
+def reserve(event):
+    # Atomic database reservation: duplicate events never consume a second slot.
+    return db().rpc('reserve_ai_usage', {'p_user_id': event.source.user_id,
+                   'p_event_id': event.webhook_event_id, 'p_limit': int(os.getenv('DAILY_AI_LIMIT', '10'))}).execute().data
+
+
+def process(event, is_image):
+    # Group messages may contain other people's personal data. Support personal chats only.
+    if event.source.type != 'user':
+        return
+    user_id = event.source.user_id
+    stage = 'command'
+    with ApiClient(Configuration(access_token=os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))) as client:
+        api = MessagingApi(client)
+        try:
+            reply = None if is_image else text_command(user_id, event.message.text.strip())
+            if is_image and not consented(user_id):
+                reply = INTRO
+            if reply is None:
+                stage = 'usage_reservation'
+                status = reserve(event)
+                if status == 'duplicate':
+                    return
+                if status == 'limit':
+                    reply = '今日のAI利用上限に達しました。明日また使ってください。「今日」で記録を確認できます。'
+                elif status != 'allowed':
+                    raise RuntimeError('Unexpected reservation status')
+                elif is_image:
+                    stage = 'line_image_download'
+                    blob = MessagingApiBlob(client).get_message_content(event.message.id)
+                    if len(blob) > 10 * 1024 * 1024:
+                        raise ValueError('写真は10MB以下にしてください。')
+                    with Image.open(io.BytesIO(blob)) as source:
+                        if source.width * source.height > 20_000_000:
+                            raise ValueError('写真のサイズを小さくして送ってください。')
+                        image = ImageOps.exif_transpose(source).convert('RGB')
+                        image.thumbnail((1600, 1600))
+                        buffer = io.BytesIO()
+                        image.save(buffer, format='JPEG', quality=85)
+                    stage = 'gemini_image_analysis'
+                    meal = validate_meal(json.loads(generate(MEAL_PROMPT, buffer.getvalue())))
+                    stage = 'meal_save'
+                    db().rpc('save_nutrition_meal', {'p_user_id': user_id, 'p_event_id': event.webhook_event_id,
+                             'p_message_id': event.message.id, 'p_meal': meal}).execute()
+                    stage = 'daily_summary'
+                    reply = meal_reply(meal, *calorie_summary(today_rows(user_id)))
+                else:
+                    stage = 'gemini_chat'
+                    reply = generate(event.message.text[:2000])[:4000]
+        except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+            app.logger.warning('message_validation_failed stage=%s', stage)
+            reply = '内容を確認できませんでした。食事がはっきり写った小さめの写真、または短い文章で再送してください。記録を確認するには「今日」と送信してください。'
+        except Exception as exc:
+            # Never log request bodies, identifiers, keys, or provider error details.
+            app.logger.error('message_processing_failed stage=%s type=%s', stage, type(exc).__name__)
+            reply = '一時的に処理できませんでした。「今日」で保存済みの記録を確認し、時間をおいて再送してください。'
+        try:
+            api.reply_message(ReplyMessageRequest(reply_token=event.reply_token, messages=[TextMessage(text=reply)]))
+        except Exception as exc:
+            app.logger.error('line_reply_failed type=%s', type(exc).__name__)
+            raise RuntimeError('LINE reply failed') from None
+
+
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_blob_api = MessagingApiBlob(api_client)
-        
-        try:
-            user_id = event.source.user_id
+    process(event, True)
 
-            # Loadingアニメーション
-            line_bot_api.show_loading_animation(
-                ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=20)
-            )
 
-            # ユーザー登録チェック
-            user_check = supabase.table("users").select("user_id", "target_weight").eq("user_id", user_id).execute()
-            
-            if not user_check.data:
-                try:
-                    profile = line_bot_api.get_profile(user_id)
-                    display_name = profile.display_name
-                except:
-                    display_name = "Guest"
-                
-                supabase.table("users").insert({
-                    "user_id": user_id,
-                    "user_name": display_name,
-                    "target_weight": 0,
-                    "current_weight": 0
-                }).execute()
-
-            # 画像取得 & Gemini解析
-            image_data = line_bot_blob_api.get_message_content(event.message.id)
-            image = Image.open(io.BytesIO(image_data))
-
-            prompt = """
-            あなたはユーザー（20代女性）の親友「ユキ」です。
-            送られた食事の写真を見て、以下のJSONフォーマットのみを出力してください。
-            
-            【重要な制約】
-            ・カロリーや栄養素は画像からの「推測値」です。
-            ・医療的アドバイスは禁止。
-            
-            【出力フォーマット】
-            {
-                "food_name": "料理名（短く）",
-                "calorie": 整数値,
-                "carbs": "炭水化物の推測値（例: 50g）",
-                "protein": "タンパク質の推測値（例: 20g）",
-                "fat": "脂質の推測値（例: 15g）",
-                "reply_text": "タメ口ギャル語で全肯定。数値には触れず、見た目やバランスを褒める。3行以内。"
-            }
-            """
-            
-            response = model.generate_content(
-                [prompt, image],
-                generation_config={"response_mime_type": "application/json"}
-            )
-            
-            data = json.loads(response.text)
-            
-            food_name = data.get("food_name", "ご飯")
-            calorie = data.get("calorie", 0)
-            carbs = data.get("carbs", "不明")
-            protein = data.get("protein", "不明")
-            fat = data.get("fat", "不明")
-            reply_base = data.get("reply_text", "美味しそう！✨")
-
-            # データを保存
-            supabase.table("food_logs").insert({
-                "user_id": user_id,
-                "food_name": food_name,
-                "calorie": calorie
-            }).execute()
-
-            # 今日の合計を計算
-            jst = datetime.timezone(datetime.timedelta(hours=9))
-            today_start = datetime.datetime.now(jst).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-            rows = supabase.table("food_logs").select("calorie").eq("user_id", user_id).gte("created_at", today_start).execute()
-            total_cal = sum([row['calorie'] for row in rows.data])
-
-            # ==========================================
-            # ▼▼▼ レイアウト修正（ご指定の形式） ▼▼▼
-            # ==========================================
-            final_reply = (
-                f"{reply_base}\n\n"
-                f"🍽️ {food_name}\n"
-                f"📊 今回の目安:\n"
-                f"・カロリー: 約{calorie}kcal\n"
-                f"・P(タンパク質): {protein}\n"
-                f"・F(脂質): {fat}\n"
-                f"・C(炭水化物): {carbs}\n\n"
-                f"────────\n"
-                f"今日の合計: {total_cal}kcal 📝"
-            )
-
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=final_reply)]
-                )
-            )
-            
-        except Exception as e:
-            print(f"Error: {e}")
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="ごめん、ちょっと見えなかったかも💦 もう一回送ってみて！🥺")]
-                )
-            )
-
-# ==========================================
-# ▼▼▼ 2. テキストメッセージの処理 (シンプル会話版) ▼▼▼
-# ==========================================
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        
-        user_id = event.source.user_id
-        user_message = event.message.text
-        
-        # 1. Loadingアニメーション（会話でも出すと親切）
-        line_bot_api.show_loading_animation(
-            ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=20)
-        )
+    process(event, False)
 
-        try:
-            # ▼▼▼ 追加部分: 「使い方」への固定返信 ▼▼▼
-            if user_message == "使い方":
-                reply_text = (
-                    "【ユキの使い方 💖】\n\n"
-                    "📸 **食事を記録**\n"
-                    "料理の写真を送るだけ！\n"
-                    "カロリーと栄養バランスを計算するよ！\n\n"
-                    "💬 **おしゃべり**\n"
-                    "「痩せたい」「1日何キロカロリー取ればいいの？」みたいに話しかけて！\n"
-                    "私が全力でサポートするからね！🔥"
-                )
-            # ▲▲▲ ここまで ▲▲▲
-            
-            else:
-            # 2. ユーザーの名前だけ取得（親しみを込めるため）
-                user_data = supabase.table("users").select("user_name").eq("user_id", user_id).execute()
-                user_name = "キミ"
-                if user_data.data:
-                    user_name = user_data.data[0]['user_name']
 
-                # 3. Geminiへのプロンプト（体重管理の話は削除）
-                prompt = f"""
-                あなたは20代女性の親友「ユキ」です。
-                ユーザー（名前: {user_name}）から以下のメッセージが来ました。
-                
-                メッセージ: "{user_message}"
-                
-                以下のルールで返信してください：
-                ・タメ口、ギャル語、全肯定。
-                ・短くテンポよく（3行以内）。
-                ・「お腹すいた」などの相談には、食事管理を頑張ってる友達として励ます。
-                ・体重の数字や目標設定の話は自分からはしない。
-                """
-                
-                response = model.generate_content(prompt)
-                reply_text = response.text
-
-            # 返信
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply_text)]
-                )
-            )
-
-        except Exception as e:
-            print(f"Error: {e}")
-            # エラー時は何もしない
-
-if __name__ == "__main__":
-    app.run(port=5000)
+if __name__ == '__main__':
+    app.run(port=int(os.getenv('PORT', '5000')))
