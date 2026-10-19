@@ -4,7 +4,9 @@
 Supabase: `nfcdspogzywouytdtjjy`。旧版は2026-10-19に写真解析の復旧を利用者が確認済み。
 2026-10-19: 利用者が本番SQL Editorで001_beta.sqlを実行し、
 `schema_version = 001_beta` の結果画像で移行完了を確認。
-改修版のGitHub反映・Renderデプロイ・実機受入はまだ実行していない。
+001_beta版（19c43e7）のGitHub反映とRender公開を完了。
+公開URL、healthz、readyzで200を確認し、利用者のLINE実機で同意・写真記録・当日集計まで確認済み。
+当日集計は食事返信・「今日」とも3件・約2,620kcalで一致。
 
 2026-10-19に提供されたpreflight_reportを確認済み。users.user_idはtextの主キー、
 user_nameはnullable text、food_logs.calorieはnullable integer、created_atはtimestamptzでnow()が既定値。
@@ -73,3 +75,18 @@ select public.nutrition_schema_version();
 - DBは追加した列・テーブルを残す。食事記録や同意情報を削除して戻さない。
 - 旧版でもservice_roleキーならRLSの変更後に接続できる。旧版の利用継続は短期間に留める。
 - Render無料枠の休止とSupabaseプロジェクト休止の再発を監視する。
+
+## records-v1の反映
+
+この追加は001_betaの既存列を使用するため、新しいSQLや環境変数は不要。
+本番データを変更する受入試験は、利用者自身または専用テストアカウントで行う。
+
+1. テスト成功後、GitHubのmainへコードを反映。
+2. RenderのManual Deployから今回のコミットをデプロイする。
+   先のコミット指定デプロイで自動デプロイは無効になっている可能性がある。
+3. `/version` が `release: records-v1` を返すことと、`/readyz` の200を確認。
+4. LINEの「履歴」と「7日間」を確認。訂正・取消はテスト用の食事記録だけで行う。
+5. 例: テスト写真→「履歴」→実際の番号で「訂正 番号 テスト食 600」→「今日」。
+   さらに「取消 番号」でまだ残っていることを確認し、「取消確定 番号」で1件だけ消えることを確認。
+
+ポリシー公開は利用者の指定により保留。PRIVACY_URLを仮文面へ差し替えない。

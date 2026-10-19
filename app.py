@@ -1,4 +1,5 @@
 import base64
+import datetime as dt
 import io
 import json
 import logging
@@ -14,7 +15,8 @@ from linebot.v3.webhooks import MessageEvent, ImageMessageContent, TextMessageCo
 from PIL import Image, ImageOps, UnidentifiedImageError
 from supabase import ClientOptions, create_client
 
-from nutrition import SYSTEM_PROMPT, MEAL_PROMPT, day_bounds, validate_meal, meal_reply, calorie_summary
+from nutrition import JST, SYSTEM_PROMPT, MEAL_PROMPT, day_bounds, validate_meal, meal_reply, calorie_summary
+from records import RecordInputError, parse_record_command, week_bounds, format_history, format_week, handle_record_command
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
@@ -32,7 +34,7 @@ INTRO = ('ユキは食生活を支えるAIです。管理栄養士・医師で�
          '\n18歳以上の一般成人向け招待制β版です。\n食事画像・相談文をGoogle Geminiへ送信し、'
          'LINEユーザーID・食事記録・同意日時をSupabaseに保存します。画像自体は当サービスのDBに保存しません。'
          '\n写真の栄養値は推定です。\n「プライバシー」で詳細を確認し、同意する場合は「同意する」と送信してください。')
-HELP = '初めての方は「プライバシー」を確認し、「同意する」と送ってください。\n写真で食事を記録できます。\n「今日」合計を確認\n「料金」β版の案内\n「プライバシー」データの扱い\n「データ削除」全記録を削除\n相談も送れます。'
+HELP = '初めての方は「プライバシー」を確認し、「同意する」と送ってください。\n写真で食事を記録できます。\n「今日」合計を確認\n「履歴」直近7日間の記録番号\n「訂正 番号 料理名 カロリー」記録を訂正\n「取消 番号」1件の削除を確認\n「7日間」振り返り\n「料金」β版の案内\n「プライバシー」データの扱い\n「データ削除」全記録を削除\n相談も送れます。'
 
 
 @lru_cache(maxsize=1)
@@ -67,6 +69,12 @@ def generate(text, image=None):
 @app.get('/')
 def home():
     return 'Yuki nutrition AI beta'
+
+
+@app.get('/version')
+def version():
+    return jsonify(release='records-v1', commit=os.getenv('RENDER_GIT_COMMIT', 'unknown'),
+                   features=['history', 'meal_edit', 'meal_cancel', 'weekly_summary'])
 
 
 @app.get('/healthz')
@@ -117,6 +125,20 @@ def consented(user_id):
     return bool(rows and rows[0].get('consent_version') == CONSENT_VERSION)
 
 
+def recent_rows(user_id, history=False, now=None):
+    start, end = week_bounds(now)
+    result, offset = [], 0
+    while True:
+        page_size = 20 if history else 500
+        rows = db().table('food_logs').select('id,food_name,calorie,created_at').eq('user_id', user_id).gte(
+            'created_at', start.isoformat()).lt('created_at', end.isoformat()).order(
+            'created_at', desc=True).order('id', desc=True).range(offset, offset + page_size - 1).execute().data
+        result.extend(rows)
+        if history or len(rows) < page_size:
+            return result
+        offset += page_size
+
+
 def text_command(user_id, text):
     if text in ('使い方', 'ヘルプ'):
         return HELP
@@ -134,6 +156,14 @@ def text_command(user_id, text):
         return '同意を記録しました。\n' + HELP
     if not consented(user_id):
         return INTRO
+    if text == '履歴':
+        return format_history(recent_rows(user_id, history=True))
+    if text in ('7日間', '週報', '振り返り'):
+        now = dt.datetime.now(JST)
+        return format_week(recent_rows(user_id, now=now), now=now)
+    command = parse_record_command(text)
+    if command:
+        return handle_record_command(db(), user_id, command)
     if text == '今日':
         rows = today_rows(user_id)
         total, notice = calorie_summary(rows)
@@ -150,6 +180,11 @@ def reserve(event):
 def process(event, is_image):
     # Group messages may contain other people's personal data. Support personal chats only.
     if event.source.type != 'user':
+        return
+    # A delayed replay must not overwrite a newer correction. Users can check history
+    # and submit a fresh command if an original attempt was lost before processing.
+    if (not is_image and getattr(getattr(event, 'delivery_context', None), 'is_redelivery', False)
+            and event.message.text.strip().startswith(('訂正', '取消'))):
         return
     user_id = event.source.user_id
     stage = 'command'
@@ -190,6 +225,8 @@ def process(event, is_image):
                 else:
                     stage = 'gemini_chat'
                     reply = generate(event.message.text[:2000])[:4000]
+        except RecordInputError as exc:
+            reply = str(exc)
         except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):
             app.logger.warning('message_validation_failed stage=%s', stage)
             reply = '内容を確認できませんでした。食事がはっきり写った小さめの写真、または短い文章で再送してください。記録を確認するには「今日」と送信してください。'
