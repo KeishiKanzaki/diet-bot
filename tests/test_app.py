@@ -177,6 +177,17 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(api.return_value.reply_message.call_args.args[0].messages[0].text, bot.INTRO)
 
     @patch.object(bot.requests, 'post')
+    def test_existing_environment_uses_working_model_without_new_setting(self, post):
+        post.return_value.json.return_value = {'candidates': [{
+            'finishReason': 'STOP', 'content': {'parts': [{'text': 'こんにちは'}]}
+        }]}
+        for model, expected in [('', bot.DEFAULT_GEMINI_MODEL), ('custom-model', 'custom-model')]:
+            with self.subTest(model=model), patch.dict(os.environ, {'GEMINI_MODEL': model}):
+                self.assertEqual(bot.generate('hello'), 'こんにちは')
+                self.assertIn('/models/' + expected + ':generateContent', post.call_args.args[0])
+                self.assertEqual(self.client.get('/healthz').status_code, 200)
+
+    @patch.object(bot.requests, 'post')
     def test_truncated_response_rejected(self, post):
         post.return_value.json.return_value = {'candidates': [{'finishReason': 'MAX_TOKENS'}]}
         with self.assertRaises(RuntimeError):

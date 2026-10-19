@@ -41,9 +41,9 @@ select public.nutrition_schema_version();
 ## 3. Render設定
 
 - 既存のLINE・Google・Supabaseの環境変数を維持する。
-- `GEMINI_MODEL=gemini-3-flash-preview` を追加する。
-  これは今回復旧した旧コードで使っているモデル。新規導入時は利用可能性を別途確認する。
-- `DAILY_AI_LIMIT=10` を追加する。
+- `GEMINI_MODEL`は任意。未設定または空なら既存の`gemini-3-flash-preview`を使う。
+  追加設定なしで旧版の接続情報を維持できる。新規導入時はモデルの利用可能性を別途確認する。
+- `DAILY_AI_LIMIT`も任意。既定値は10。
 - `PRIVACY_URL` に運営者と問い合わせ先を含む公開ポリシーURLを設定する。
   未設定のまま利用者への一般公開はしない。運営者本人の疎通確認は可能。
 - Build Command: `pip install -r requirements.txt`

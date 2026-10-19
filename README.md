@@ -36,7 +36,8 @@ set +a
 Supabase SQL Editorで、バックアップ後に `migrations/001_beta.sql` を実行。
 既存DBの定義はこのリポジトリにないため、事前に型・主キー・重複・既存ポリシーを確認してください。
 `SUPABASE_KEY` はサーバー専用のservice_roleキーです。匿名キーでは動作させません。
-`GEMINI_MODEL`はプロジェクトで利用できるモデルIDを設定し、実画像で疎通確認してください。
+`GEMINI_MODEL`の既定値は既存サービスで確認済みの`gemini-3-flash-preview`です。
+既存Renderへの移行で追加設定は不要。別モデルを使う場合は環境変数で指定して疎通確認してください。
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v

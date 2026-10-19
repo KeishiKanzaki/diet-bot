@@ -22,7 +22,8 @@ logging.basicConfig(level=logging.INFO)
 # httpx INFO logs include database query URLs containing LINE user IDs.
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
-REQUIRED = ('LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'GEMINI_API_KEY', 'GEMINI_MODEL', 'SUPABASE_URL', 'SUPABASE_KEY')
+REQUIRED = ('LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'GEMINI_API_KEY', 'SUPABASE_URL', 'SUPABASE_KEY')
+DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview'
 LINE_REQUIRED = ('LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET')
 handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET', 'not-configured'))
 Image.MAX_IMAGE_PIXELS = 20_000_000
@@ -48,7 +49,8 @@ def generate(text, image=None):
     if image:
         config['responseMimeType'] = 'application/json'
     response = requests.post(
-        'https://generativelanguage.googleapis.com/v1beta/models/' + os.environ['GEMINI_MODEL'] + ':generateContent',
+        'https://generativelanguage.googleapis.com/v1beta/models/'
+        + (os.getenv('GEMINI_MODEL') or DEFAULT_GEMINI_MODEL) + ':generateContent',
         headers={'x-goog-api-key': os.environ['GEMINI_API_KEY']},
         json={'systemInstruction': {'parts': [{'text': SYSTEM_PROMPT}]},
               'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': config}, timeout=(5, 20))
