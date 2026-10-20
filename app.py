@@ -17,6 +17,7 @@ from supabase import ClientOptions, create_client
 
 from nutrition import JST, SYSTEM_PROMPT, MEAL_PROMPT, day_bounds, validate_meal, meal_reply, calorie_summary
 from records import RecordInputError, parse_record_command, week_bounds, format_history, format_week, handle_record_command
+from records import is_manual_record_request, parse_manual_meal, save_manual_meal
 from cost_control import AIRequestsDisabled, AI_PAUSED_REPLY, ai_requests_enabled, require_free_tier_confirmation
 
 app = Flask(__name__)
@@ -35,7 +36,7 @@ INTRO = ('ユキは食生活を支えるAIです。管理栄養士・医師で�
          '\n18歳以上の一般成人向け招待制β版です。\n食事画像・相談文をGoogle Geminiへ送信し、'
          'LINEユーザーID・食事記録・同意日時をSupabaseに保存します。画像自体は当サービスのDBに保存しません。'
          '\n写真の栄養値は推定です。\n「プライバシー」で詳細を確認し、同意する場合は「同意する」と送信してください。')
-HELP = '初めての方は「プライバシー」を確認し、「同意する」と送ってください。\n写真で食事を記録できます。\n「今日」合計を確認\n「履歴」直近7日間の記録番号\n「訂正 番号 料理名 カロリー」記録を訂正\n「取消 番号」1件の削除を確認\n「7日間」振り返り\n「料金」β版の案内\n「プライバシー」データの扱い\n「データ削除」全記録を削除\n相談も送れます。'
+HELP = '初めての方は「プライバシー」を確認し、「同意する」と送ってください。\n写真で食事を記録できます。\n「記録 料理名 カロリー」AIなしで手入力\n例：記録 焼き魚定食 600\n「今日」合計を確認\n「履歴」直近7日間の記録番号\n「訂正 番号 料理名 カロリー」記録を訂正\n「取消 番号」1件の削除を確認\n「7日間」振り返り\n「料金」β版の案内\n「プライバシー」データの扱い\n「データ削除」全記録を削除\n相談も送れます。'
 
 
 @lru_cache(maxsize=1)
@@ -76,8 +77,8 @@ def home():
 
 @app.get('/version')
 def version():
-    return jsonify(release='cost-guard-v1', commit=os.getenv('RENDER_GIT_COMMIT', 'unknown'),
-                   features=['history', 'meal_edit', 'meal_cancel', 'weekly_summary', 'ai_cost_guard'])
+    return jsonify(release='manual-records-v1', commit=os.getenv('RENDER_GIT_COMMIT', 'unknown'),
+                   features=['history', 'meal_edit', 'meal_cancel', 'weekly_summary', 'ai_cost_guard', 'manual_meal'])
 
 
 @app.get('/cost-status')
@@ -150,7 +151,7 @@ def recent_rows(user_id, history=False, now=None):
         offset += page_size
 
 
-def text_command(user_id, text):
+def text_command(user_id, text, message_id=None):
     if text in ('使い方', 'ヘルプ'):
         return HELP
     if text == 'プライバシー':
@@ -169,6 +170,9 @@ def text_command(user_id, text):
         return '同意を記録しました。\n' + HELP
     if not consented(user_id):
         return INTRO
+    manual_meal = parse_manual_meal(text)
+    if manual_meal:
+        return save_manual_meal(db(), user_id, message_id, manual_meal)
     if text == '履歴':
         return format_history(recent_rows(user_id, history=True))
     if text in ('7日間', '週報', '振り返り'):
@@ -180,7 +184,7 @@ def text_command(user_id, text):
     if text == '今日':
         rows = today_rows(user_id)
         total, notice = calorie_summary(rows)
-        return f"今日の記録: {len(rows)}件、約{total:g}kcal。{notice}\n写真からの推定です。未記録の食事は含みません。"
+        return f"今日の記録: {len(rows)}件、約{total:g}kcal。{notice}\n写真は推定値、手入力・訂正は入力値です。未記録の食事は含みません。"
     return None
 
 
@@ -196,15 +200,17 @@ def process(event, is_image):
         return
     # A delayed replay must not overwrite a newer correction. Users can check history
     # and submit a fresh command if an original attempt was lost before processing.
-    if (not is_image and getattr(getattr(event, 'delivery_context', None), 'is_redelivery', False)
-            and event.message.text.strip().startswith(('訂正', '取消'))):
-        return
+    if not is_image and getattr(getattr(event, 'delivery_context', None), 'is_redelivery', False):
+        text = event.message.text.strip()
+        if text.startswith(('訂正', '取消')) or is_manual_record_request(text):
+            return
     user_id = event.source.user_id
     stage = 'command'
     with ApiClient(Configuration(access_token=os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))) as client:
         api = MessagingApi(client)
         try:
-            reply = None if is_image else text_command(user_id, event.message.text.strip())
+            reply = None if is_image else text_command(user_id, event.message.text.strip(),
+                                                       message_id=getattr(event.message, 'id', None))
             if is_image and not consented(user_id):
                 reply = INTRO
             if reply is None and not ai_requests_enabled():
@@ -215,7 +221,7 @@ def process(event, is_image):
                 if status == 'duplicate':
                     return
                 if status == 'limit':
-                    reply = '今日のAI利用上限に達しました。明日また使ってください。「今日」で記録を確認できます。'
+                    reply = '今日のAI利用上限に達しました。AIは明日また使ってください。「記録 料理名 カロリー」で手入力、「今日」で合計確認ができます。'
                 elif status != 'allowed':
                     raise RuntimeError('Unexpected reservation status')
                 elif is_image:

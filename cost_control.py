@@ -6,7 +6,8 @@ an operator attestation, not proof that a provider account remains on Free.
 import os
 
 AI_PAUSED_REPLY = ('AIの写真解析・相談は、無料枠の確認が終わるまで停止中です。'
-                   '\n「今日」「履歴」「7日間」と、記録の訂正・取消は利用できます。')
+                   '\n「記録 料理名 カロリー」でAIなしの手入力ができます。'
+                   '\n「今日」「履歴」「7日間」と、記録の訂正・取消も利用できます。')
 
 
 class AIRequestsDisabled(RuntimeError):

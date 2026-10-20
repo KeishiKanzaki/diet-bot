@@ -13,6 +13,40 @@ class RecordInputError(Exception):
 
 EDIT_HELP = '「履歴」で番号を確認し、「訂正 番号 料理名 カロリー」と送ってください。\n例：訂正 123 焼き魚定食 600\nカロリーは0〜5000の整数です。'
 CANCEL_HELP = '「履歴」で番号を確認し、「取消 番号」と送ってください。\n例：取消 123\n確認後、「取消確定 番号」でその1件を削除します。'
+MANUAL_HELP = '「記録 料理名 カロリー」と送ってください。\n例：記録 焼き魚定食 600\nカロリーは0〜5000の整数です。AIやPFCの推定は使いません。'
+
+
+def is_manual_record_request(text):
+    return bool(re.match(r'^記録(?:\s|$)', text))
+
+
+def parse_manual_meal(text):
+    if not is_manual_record_request(text):
+        return None
+    match = re.fullmatch(r'記録\s+(.+?)\s+([0-9]{1,4})(?:kcal)?', text, re.IGNORECASE)
+    if not match:
+        raise RecordInputError(MANUAL_HELP)
+    name, calorie = ' '.join(match[1].split()), int(match[2])
+    if not 1 <= len(name) <= 100 or calorie > 5000:
+        raise RecordInputError(MANUAL_HELP)
+    return dict(food_name=name, calorie=calorie, protein=None, fat=None, carbs=None)
+
+
+def save_manual_meal(database, user_id, message_id, meal):
+    if not message_id:
+        raise RecordInputError('メッセージを識別できませんでした。新しいメッセージで再送してください。')
+    # The unique message_id index already exists in 001_beta. A duplicate must
+    # neither overwrite a later edit nor create a second entry.
+    rows = database.table('food_logs').upsert(
+        {'user_id': user_id, 'message_id': message_id, 'food_name': meal['food_name'],
+         'calorie': meal['calorie'], 'protein': None, 'fat': None, 'carbs': None},
+        on_conflict='message_id', ignore_duplicates=True,
+    ).execute().data
+    if not rows:
+        return 'このメッセージはすでに記録済みです。重ねて保存していません。「履歴」で確認してください。'
+    row = rows[0]
+    return (f"手入力で記録しました。\n#{row['id']} {meal['food_name']} / {meal['calorie']}kcal（入力値）\n"
+            'PFCは不明として保存しています。\n「今日」で合計、「履歴」で番号を確認できます。')
 
 
 @dataclass(frozen=True)
@@ -64,7 +98,7 @@ def calorie_label(value):
 
 def format_history(rows):
     if not rows:
-        return '直近7日間の記録はありません。食事写真を送ると記録できます。'
+        return '直近7日間の記録はありません。食事写真、または「記録 料理名 カロリー」で記録できます。'
     lines = ['直近7日間の履歴（新しい順・最大20件）']
     for row in rows[:20]:
         when = local_time(row['created_at']).strftime('%m/%d %H:%M')
@@ -101,7 +135,7 @@ def format_week(rows, now=None):
         lines.append(f'{date:%m/%d}：{text}')
     if notice:
         lines.append(notice.strip())
-    lines.append('写真の数値は推定です。未記録の食事は含みません。記録なしは摂取ゼロを意味しません。')
+    lines.append('写真は推定値、手入力・訂正は入力値です。未記録の食事は含みません。記録なしは摂取ゼロを意味しません。')
     return '\n'.join(lines)
 
 

@@ -99,3 +99,14 @@ Renderの提供画像でHobby・Freeサービス・カード未登録・使用�
 履歴・訂正・取消・当日集計・7日間集計はそのまま使える。
 `/cost-status`の`ai_requests_enabled: false`を、AIを試験呼出しせずに確認する。
 この診断は外部の契約・請求額の検証ではない。
+
+cost-guard-v1の本番反映後、利用者がGoogleの無料プロジェクトと使用キーの一致を確認。
+RenderのFree確認設定をtrueへ変更し、公開診断で有効化を確認済み。実AIの試験呼出しはしていない。
+
+## manual-records-v1の反映
+
+新しいSQLと環境変数は不要。`GEMINI_FREE_TIER_CONFIRMED`の現在値を維持する。
+GitHub反映後、今回のコミットを既存のdiet-botサービスへ手動デプロイする。
+新しいサービス、DB、ドメイン、有料プランは作成しない。
+`/version`の`manual-records-v1`と、`/cost-status`の状態を確認する。
+AIを呼ばない実機確認はBETA_OPERATIONS.mdの「記録 動作確認用 600」から実施する。

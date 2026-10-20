@@ -49,4 +49,4 @@ def meal_reply(meal, total, notice=''):
             f"📊 今回の目安:\n・カロリー: 約{meal['calorie']:g}kcal\n"
             f"・P(タンパク質): {meal['protein']:g}g\n・F(脂質): {meal['fat']:g}g\n"
             f"・C(炭水化物): {meal['carbs']:g}g\n\n────────\n"
-            f"今日の記録合計: 約{total:g}kcal 📝{notice}\n写真からの推定です。未記録の食事は含みません。")
+            f"今日の記録合計: 約{total:g}kcal 📝{notice}\n写真は推定値、手入力・訂正は入力値です。未記録の食事は含みません。")

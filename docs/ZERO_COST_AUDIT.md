@@ -8,7 +8,7 @@
 
 | 対象 | 公式条件で分かったこと | 実アカウントの確認状態 |
 |---|---|---|
-| Gemini | 使用モデルにはStandardのFree Tierがある。利用プロジェクトのTierを確認する必要がある | 提供画像のdietプロジェクトは無料枠。RenderのAPIキーの発行元との照合は未実施 |
+| Gemini | 使用モデルにはStandardのFree Tierがある。利用プロジェクトのTierを確認する必要がある | 提供画像のdietプロジェクトは無料枠。利用者がRenderのキーとの一致を確認済みと回答 |
 | Render | Freeでも支払い方法登録済みなら、通信量・ビルド利用の超過で請求され得る | 提供画像でWorkspaceはHobby、カード未登録、使用量は無料枠内。サービスは既出画像でFree |
 | Supabase | Free Planでは課金されない。ProのSpend Capは有料基本料を0円にするものではない | 提供画像のOrganizationはFree Plan、Spend cap有効。Marketplaceの表示済み過去請求はTotal Due $0.00。dietの所属照合と2026年10月の請求予定額は未確認 |
 | LINE | Reply APIは月間メッセージ通数の算定対象外。固定月額は契約プランで別に発生し得る | 対象アカウントの提供画像でコミュニケーションプランを確認。コードはReply APIのみ。有料オプションの一覧は未確認 |
@@ -68,7 +68,7 @@ LINE Official Account Managerの提供画像:
 APIキー、カード情報、個人の請求先住所はチャットに貼らない。
 有料契約が見つかっても勝手に解約・ダウングレードしない。他サービスやデータへの影響を確認する。
 
-## 実装上の保護（新規コード、本番未反映）
+## 実装上の保護（cost-guard-v1は本番反映済み）
 
 - `GEMINI_FREE_TIER_CONFIRMED` が `true` 以外なら写真解析・AI相談を停止。
 - Geminiネットワーク呼出し直前にも確認し、LINEハンドラ以外からも停止を迂回させない。
@@ -84,12 +84,18 @@ APIキー、カード情報、個人の請求先住所はチャットに貼ら�
 
 ## 反映順序
 
-現在公開中のrecords-v1には上記スイッチがない。確認完了までは写真・AI相談の追加テストをしない。
+cost-guard-v1（74f75d4）は本番反映済み。`/version`と`/cost-status`の200を確認。
+一度AI停止を確認した後、利用者がキーの一致を確認し、RenderでFree確認設定をtrueへ変更。
+再デプロイ後、`ai_requests_enabled: true`、`paid_fallback_enabled: false`、
+`provider_billing_auto_verified: false`を診断で確認済み。これらの診断でAIは呼んでいない。
 Renderは提供画像でHobby・Freeサービス・カード未登録、ビルド1/500分を確認済み。
-この確認に基づき、AIを呼ばない保護版のGitHub反映準備を進める。
+この確認に基づき、既存の無料枠構成を維持して開発を続ける。
 有料プランへの変更や支払い方法登録はしない。新しいSQLの適用も不要。
 保護版のデプロイ後は、未設定ならAIだけ停止する。再開はGoogleのFree Tier照合後に行う。
 デプロイ後の確認は`/version`と`/cost-status`を使用し、確認のためにAIを呼ばない。
+
+次のmanual-records-v1は、既存DBで手入力を処理し、AI利用枠の予約も行わない。
+AIが停止中でも利用可能。DB・LINE・ホスティングの使用量が発生しないという意味ではない。
 
 ## 参照した公式資料
 
