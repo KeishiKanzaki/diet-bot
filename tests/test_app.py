@@ -42,7 +42,7 @@ class NutritionTests(unittest.TestCase):
 class WebhookTests(unittest.TestCase):
     def setUp(self):
         self.client = bot.app.test_client()
-        self.env = patch.dict(os.environ, {k: 'test' for k in bot.REQUIRED})
+        self.env = patch.dict(os.environ, {**{k: 'test' for k in bot.REQUIRED}, 'GEMINI_FREE_TIER_CONFIRMED': 'true'})
         self.env.start()
         self.addCleanup(self.env.stop)
 

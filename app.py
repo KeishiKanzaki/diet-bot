@@ -17,6 +17,7 @@ from supabase import ClientOptions, create_client
 
 from nutrition import JST, SYSTEM_PROMPT, MEAL_PROMPT, day_bounds, validate_meal, meal_reply, calorie_summary
 from records import RecordInputError, parse_record_command, week_bounds, format_history, format_week, handle_record_command
+from cost_control import AIRequestsDisabled, AI_PAUSED_REPLY, ai_requests_enabled, require_free_tier_confirmation
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
@@ -44,6 +45,8 @@ def db():
 
 
 def generate(text, image=None):
+    # Guard the network boundary too, so callers cannot bypass the LINE gate.
+    require_free_tier_confirmation()
     parts = [{'text': text}]
     if image:
         parts.append({'inlineData': {'mimeType': 'image/jpeg', 'data': base64.b64encode(image).decode()}})
@@ -73,8 +76,16 @@ def home():
 
 @app.get('/version')
 def version():
-    return jsonify(release='records-v1', commit=os.getenv('RENDER_GIT_COMMIT', 'unknown'),
-                   features=['history', 'meal_edit', 'meal_cancel', 'weekly_summary'])
+    return jsonify(release='cost-guard-v1', commit=os.getenv('RENDER_GIT_COMMIT', 'unknown'),
+                   features=['history', 'meal_edit', 'meal_cancel', 'weekly_summary', 'ai_cost_guard'])
+
+
+@app.get('/cost-status')
+def cost_status():
+    # No provider requests, credentials or user records are accessed here.
+    return jsonify(ai_requests_enabled=ai_requests_enabled(),
+                   free_tier_operator_confirmed=ai_requests_enabled(),
+                   provider_billing_auto_verified=False, paid_fallback_enabled=False)
 
 
 @app.get('/healthz')
@@ -145,7 +156,9 @@ def text_command(user_id, text):
     if text == 'プライバシー':
         return INTRO + '\n記録は削除するまで保持。削除は「データ削除」→「削除を確定」。バックアップや外部事業者側の保持は各社規定によります。\n' + os.getenv('PRIVACY_URL', '運営者への連絡先・正式ポリシーは招待時の案内をご確認ください。')
     if text == '料金':
-        return '現在は無料の招待制β版です。1日あたりAI利用は最大' + os.getenv('DAILY_AI_LIMIT', '10') + '回（失敗も含む）。自動課金はありません。有料版は検証後にご案内します。'
+        status = 'AIは無料枠の確認待ちで停止中です。' if not ai_requests_enabled() else 'AI機能は無料枠確認の設定で動作しています。'
+        return ('現在は無料の招待制β版です。利用者への自動課金はありません。\n' + status
+                + '\n1日あたりAI利用は最大' + os.getenv('DAILY_AI_LIMIT', '10') + '回（失敗も含む）。')
     if text == 'データ削除':
         return '全食事記録・同意情報・利用履歴を削除します。実行する場合は「削除を確定」と送信してください。'
     if text == '削除を確定':
@@ -194,6 +207,8 @@ def process(event, is_image):
             reply = None if is_image else text_command(user_id, event.message.text.strip())
             if is_image and not consented(user_id):
                 reply = INTRO
+            if reply is None and not ai_requests_enabled():
+                reply = AI_PAUSED_REPLY
             if reply is None:
                 stage = 'usage_reservation'
                 status = reserve(event)
@@ -225,6 +240,8 @@ def process(event, is_image):
                 else:
                     stage = 'gemini_chat'
                     reply = generate(event.message.text[:2000])[:4000]
+        except AIRequestsDisabled:
+            reply = AI_PAUSED_REPLY
         except RecordInputError as exc:
             reply = str(exc)
         except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):

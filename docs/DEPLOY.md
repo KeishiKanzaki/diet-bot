@@ -90,3 +90,12 @@ select public.nutrition_schema_version();
    さらに「取消 番号」でまだ残っていることを確認し、「取消確定 番号」で1件だけ消えることを確認。
 
 ポリシー公開は利用者の指定により保留。PRIVACY_URLを仮文面へ差し替えない。
+
+## cost-guard-v1の反映前提
+
+Renderの提供画像でHobby・Freeサービス・カード未登録・使用量が無料枠内であることを確認済み。
+確認状況と残る未確認項目はZERO_COST_AUDIT.mdに記載。001_beta.sqlの再実行は不要。
+保護版では未設定の`GEMINI_FREE_TIER_CONFIRMED`はfalseとして扱い、AIだけ停止する。
+履歴・訂正・取消・当日集計・7日間集計はそのまま使える。
+`/cost-status`の`ai_requests_enabled: false`を、AIを試験呼出しせずに確認する。
+この診断は外部の契約・請求額の検証ではない。
