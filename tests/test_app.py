@@ -14,7 +14,7 @@ import app as bot
 
 class NutritionTests(unittest.TestCase):
     def test_fractional_calories_match_existing_integer_storage(self):
-        meal = validate_meal(dict(is_food=True, food_name='定食', calorie=500.6, protein=20.14, fat=15, carbs=60))
+        meal = validate_meal(dict(is_food=True, food_name='定食', calorie=500.6, protein=20.14, fat=15, carbs=60, advice='野菜の小鉢を添えてみてね。', encouragement='写真を送ってくれてありがとう。'))
         self.assertEqual(meal['calorie'], 501)
         self.assertIsInstance(meal['calorie'], int)
         self.assertEqual(meal['protein'], 20.1)
@@ -31,12 +31,27 @@ class NutritionTests(unittest.TestCase):
         self.assertEqual(end, '2026-10-18T15:00:00+00:00')
 
     def test_invalid_ai_output_is_not_zero_calorie_record(self):
-        good = dict(is_food=True, food_name='定食', calorie=500, protein=20, fat=15, carbs=60)
+        good = dict(is_food=True, food_name='定食', calorie=500, protein=20, fat=15, carbs=60, advice='野菜の小鉢を添えてみてね。', encouragement='写真を送ってくれてありがとう。')
         self.assertEqual(validate_meal(good)['calorie'], 500)
         for bad in [dict(good, calorie=-1), dict(good, calorie=True), dict(good, protein=float('nan')),
                     dict(good, is_food=False), dict(good, fat='15g'), {}, [], dict(good, food_name='')]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 validate_meal(bad)
+
+    def test_invalid_comments_are_rejected_before_storage(self):
+        good = dict(is_food=True, food_name='定食', calorie=500, protein=20, fat=15,
+                    carbs=60, advice='野菜の小鉢を添えてみてね。', encouragement='ありがとう。')
+        for key, value in [('advice', ''), ('advice', 'あ' * 81),
+                           ('advice', '工夫\nもう一つ'), ('encouragement', None),
+                           ('encouragement', 'あ' * 61)]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                validate_meal(dict(good, **{key: value}))
+
+    def test_help_focuses_on_photo_instead_of_command_catalogue(self):
+        self.assertIn('写真', bot.HELP)
+        self.assertIn('プライバシー', bot.HELP)
+        for command in ['履歴', '訂正', '取消', '7日間', 'PFC', '手入力']:
+            self.assertNotIn(command, bot.HELP)
 
 
 class WebhookTests(unittest.TestCase):
@@ -157,12 +172,22 @@ class WebhookTests(unittest.TestCase):
         data = io.BytesIO()
         Image.new('RGB', (20, 20)).save(data, format='JPEG')
         blob.return_value.get_message_content.return_value = data.getvalue()
-        generate.return_value = json.dumps(dict(is_food=True, food_name='定食', calorie=500, protein=20, fat=15, carbs=60))
+        generate.return_value = json.dumps(dict(is_food=True, food_name='定食', calorie=500, protein=20, fat=15, carbs=60, advice='野菜の小鉢を添えてみてね。', encouragement='写真を送ってくれてありがとう。'))
         event = SimpleNamespace(source=SimpleNamespace(type='user', user_id='u'), reply_token='r',
                                 webhook_event_id='e', message=SimpleNamespace(id='m'))
         bot.process(event, True)
         self.assertEqual(db.return_value.rpc.call_args.args[0], 'save_nutrition_meal')
         self.assertIn('500kcal', api.return_value.reply_message.call_args.args[0].messages[0].text)
+        generate.assert_called_once()
+        rows.assert_not_called()
+        stored = db.return_value.rpc.call_args.args[1]['p_meal']
+        self.assertEqual(set(stored), {'food_name', 'calorie', 'protein', 'fat', 'carbs'})
+        reply = api.return_value.reply_message.call_args.args[0].messages[0].text
+        self.assertIn('野菜の小鉢を添えてみてね。', reply)
+        self.assertIn('写真を送ってくれてありがとう。', reply)
+        self.assertNotIn('合計', reply)
+        self.assertNotIn('タンパク質', reply)
+
 
     @patch.object(bot, 'generate')
     @patch.object(bot, 'reserve')

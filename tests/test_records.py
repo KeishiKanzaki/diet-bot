@@ -13,8 +13,8 @@ class RecordTests(unittest.TestCase):
     def test_deployed_feature_version_can_be_identified_without_secrets(self):
         response = bot.app.test_client().get('/version')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json['release'], 'manual-records-v1')
-        self.assertIn('meal_edit', response.json['features'])
+        self.assertEqual(response.json['release'], 'photo-companion-v1')
+        self.assertIn('meal_advice', response.json['features'])
         self.assertEqual(set(response.json), {'release', 'commit', 'features'})
 
     def test_edit_parses_name_with_spaces_and_optional_unit(self):

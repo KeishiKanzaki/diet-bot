@@ -36,7 +36,10 @@ INTRO = ('ユキは食生活を支えるAIです。管理栄養士・医師で�
          '\n18歳以上の一般成人向け招待制β版です。\n食事画像・相談文をGoogle Geminiへ送信し、'
          'LINEユーザーID・食事記録・同意日時をSupabaseに保存します。画像自体は当サービスのDBに保存しません。'
          '\n写真の栄養値は推定です。\n「プライバシー」で詳細を確認し、同意する場合は「同意する」と送信してください。')
-HELP = '初めての方は「プライバシー」を確認し、「同意する」と送ってください。\n写真で食事を記録できます。\n「記録 料理名 カロリー」AIなしで手入力\n例：記録 焼き魚定食 600\n「今日」合計を確認\n「履歴」直近7日間の記録番号\n「訂正 番号 料理名 カロリー」記録を訂正\n「取消 番号」1件の削除を確認\n「7日間」振り返り\n「料金」β版の案内\n「プライバシー」データの扱い\n「データ削除」全記録を削除\n相談も送れます。'
+PHOTO_GUIDE = '食事の写真を送ってね。カロリーの目安と、食事に合う工夫を1つお返しします🌷'
+HELP = ('AI栄養士ユキです。' + PHOTO_GUIDE
+        + '\n初めての方は「プライバシー」を確認し、「同意する」と送ってください。'
+        + '\nデータの扱いは「プライバシー」、記録の削除は「データ削除」で確認できます。')
 
 
 @lru_cache(maxsize=1)
@@ -77,8 +80,8 @@ def home():
 
 @app.get('/version')
 def version():
-    return jsonify(release='manual-records-v1', commit=os.getenv('RENDER_GIT_COMMIT', 'unknown'),
-                   features=['history', 'meal_edit', 'meal_cancel', 'weekly_summary', 'ai_cost_guard', 'manual_meal'])
+    return jsonify(release='photo-companion-v1', commit=os.getenv('RENDER_GIT_COMMIT', 'unknown'),
+                   features=['photo_calories', 'meal_advice', 'encouragement', 'ai_cost_guard'])
 
 
 @app.get('/cost-status')
@@ -167,7 +170,7 @@ def text_command(user_id, text, message_id=None):
         return 'データを削除しました。再開時には再度同意が必要です。'
     if text == '同意する':
         db().rpc('accept_nutrition_consent', {'p_user_id': user_id}).execute()
-        return '同意を記録しました。\n' + HELP
+        return '同意を記録しました。\n' + PHOTO_GUIDE
     if not consented(user_id):
         return INTRO
     manual_meal = parse_manual_meal(text)
@@ -221,7 +224,7 @@ def process(event, is_image):
                 if status == 'duplicate':
                     return
                 if status == 'limit':
-                    reply = '今日のAI利用上限に達しました。AIは明日また使ってください。「記録 料理名 カロリー」で手入力、「今日」で合計確認ができます。'
+                    reply = '今日のAI利用上限に達しました。また明日、食事の写真を送ってね。'
                 elif status != 'allowed':
                     raise RuntimeError('Unexpected reservation status')
                 elif is_image:
@@ -240,9 +243,9 @@ def process(event, is_image):
                     meal = validate_meal(json.loads(generate(MEAL_PROMPT, buffer.getvalue())))
                     stage = 'meal_save'
                     db().rpc('save_nutrition_meal', {'p_user_id': user_id, 'p_event_id': event.webhook_event_id,
-                             'p_message_id': event.message.id, 'p_meal': meal}).execute()
-                    stage = 'daily_summary'
-                    reply = meal_reply(meal, *calorie_summary(today_rows(user_id)))
+                             'p_message_id': event.message.id,
+                             'p_meal': {key: meal[key] for key in ('food_name', 'calorie', 'protein', 'fat', 'carbs')}}).execute()
+                    reply = meal_reply(meal)
                 else:
                     stage = 'gemini_chat'
                     reply = generate(event.message.text[:2000])[:4000]
